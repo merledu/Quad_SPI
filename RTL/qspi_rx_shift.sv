@@ -17,10 +17,10 @@ module qspi_rx_shift(
     end
     else if (valid) begin
       if(lsb) begin
-        data_reg  <= {data_reg[27:0], index};
+        data_reg  <= {data_reg[27:0], qsd_i;
       end
       else if (msb) begin
-        data_reg <= {index, data_reg[27:0]};
+        data_reg <= {qsd_i, data_reg[27:0]};
       end
     end
   end
