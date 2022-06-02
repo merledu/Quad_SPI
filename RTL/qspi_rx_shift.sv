@@ -25,7 +25,7 @@ module qspi_rx_shift(
     end
   end
 
-  assign data_o <= data_reg;
+  assign data_o = data_reg;
 
 
 
