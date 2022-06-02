@@ -28,5 +28,7 @@ module qspi_rx_tb_top();
     #10 inst_qsd_i = 4'd7;
     #10 inst_qsd_i = 4'd8;
   end
+  	always #5 inst_clk_i = ~inst_clk_i;
+
 
 endmodule
