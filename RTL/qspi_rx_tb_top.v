@@ -19,7 +19,7 @@ module qspi_rx_tb_top();
 
   initial begin
         inst_clk_i = 0; inst_rst_ni = 0;
-    #10 inst_rst_ni = 1 ; inst_valid = 1; inst_lsb = 1; inst_qsd_i = 4'd1;
+    #10 inst_rst_ni = 1 ; inst_valid = 1; inst_lsb = 0; inst_qsd_i = 4'd1, inst_msb = 1;
     #10 inst_qsd_i = 4'd2;
     #10 inst_qsd_i = 4'd3;
     #10 inst_qsd_i = 4'd4;
