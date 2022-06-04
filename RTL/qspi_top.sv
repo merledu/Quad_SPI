@@ -27,14 +27,56 @@ module qspi_top();
     .qspi_i(inst_qspi_i),
     .qspi_o(inst_qspi_o),
     .qspi_oeb(inst_qspi_oeb)
-  );
+ );
 
-  initial begin
-    inst_clk_i = 0 ; inst_rst_ni = 0;
-#10 inst_rst_ni = 1; inst_we_i = 1; inst_addr_i = 0; inst_wdata_i = 32'hF208182;
-#10 inst_addr_i = 24'd20; inst_wdata_i = 32'h4;
+initial begin
+	inst_clk_i = 0 ; 
+	inst_rst_ni = 0;
+#100ns;
+	inst_rst_ni = 1; 
+#10ns;
+	inst_we_i = 1; 
+	inst_addr_i = 0; 
+	inst_wdata_i = {2'b0, 6'd15, 6'd8, 6'd8, 6'd6, 6'd2};
+#10ns;
+	inst_we_i = 0;
+	
+#10ns;
+    inst_we_i = 1; 
+	inst_addr_i = 4; 
+	inst_wdata_i = 32'habab_abab;
 
-  end
+#10ns;
+	inst_we_i = 0;
+#10ns;
+    inst_we_i = 1; 
+	inst_addr_i = 12; 
+	inst_wdata_i = 32'h00fa_bcde;
+	
+#10ns;
+	inst_we_i = 0;
+	
+#10ns;
+    inst_we_i = 1; 
+	inst_addr_i = 16; 
+	inst_wdata_i = 32'h0000_00bf;
+	
+#10ns;
+	inst_we_i = 0;
+#20ns;
+	inst_we_i = 1;
+	inst_addr_i = 24'd20; 
+	inst_wdata_i = 32'h21;
+	
+#10ns;
+	inst_we_i = 0;
+#20ns;
+	inst_we_i = 1;
+	inst_addr_i = 24'd20; 
+	inst_wdata_i = 32'h20;
+
+
+end
 
 	always #5 inst_clk_i = ~inst_clk_i;
 

@@ -1,10 +1,10 @@
 module qspi_rx_shift(
-  input  logic       clk_i,
-  input  logic       rst_ni,
-  input  logic [3:0] qsd_i,
-  input  logic       lsb,
-  input  logic       msb,
-  input  logic       valid,
+  input  logic        clk_i,
+  input  logic        rst_ni,
+  input  logic [3:0]  qsd_i,
+  input  logic        lsb,
+  input  logic        msb,
+  input  logic        valid,
   output logic [31:0] data_o
 
 );
