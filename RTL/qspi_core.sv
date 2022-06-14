@@ -1,18 +1,3 @@
-/*************************************************************************************************************
-**
-**filename : qspi_core
-**
-**Project  : quad spi interface for flash
-**
-**Purpose  : Quad SPI interface for flash available on the arty a7-35t FPGA board
-**
-**Creator  : Muhammad Waleed Waseem
-**
-**Email Address : waleed.waseem99@gmail.com
-**
-**************************************************************************************************************/
-
-
 module qspi_core #(
     parameter A_WIDTH = 24,
     parameter D_WIDTH = 32
@@ -22,16 +7,27 @@ module qspi_core #(
 // Bus interface 
     input  logic               we_i,
     input  logic               re_i,
-    input  logic [A_WIDTH-1:0] addr_i,
-    input  logic [D_WIDTH-1:0] wdata_i,
-    output logic [D_WIDTH-1:0] rdata_o,
+
+
+
+
+
+
 // QSPI interface
     output logic       qsclk_o,
     output logic       qcsb_o,
     input  logic [3:0] qspi_i,
     output logic [3:0] qspi_o,
-    output logic [3:0] qspi_oeb
+    output logic [3:0] qspi_oeb,
+    
+    output logic       intr_tx,
+    output logic       intr_rx,
+    output logic       xip_valid
 );
+
+    logic [A_WIDTH-1:0] addr_i;
+    logic [D_WIDTH-1:0] wdata_i;
+    logic [D_WIDTH-1:0] rdata_o;
 
 // qspi states
 typedef enum logic [1:0] {IDLE, READ, WRITE, XIP} main_state_t;
@@ -40,12 +36,20 @@ typedef enum logic [1:0] {WCMD, WADDR, WDATA} write_state_t;
 typedef enum logic [1:0] {XCMD, XADDR, XDUMMY, XDATA} xip_state_t; 
 
 // CSR address
-parameter CYCLE_REG = 0;
-parameter WDATA_REG = 4;
-parameter RDATA_REG = 8;
-parameter ADDR_REG  = 12;
-parameter CMD_REG   = 16;
-parameter CSR_REG   = 20;
+localparam CYCLE_REG = 0;
+localparam WDATA_REG = 4;
+localparam RDATA_REG = 8;
+localparam ADDR_REG  = 12;
+localparam CMD_REG   = 16;
+localparam CSR_REG   = 20;
+
+// monitor signals 
+
+logic transmit_intr, transmit_intr_fp;
+logic receive_intr, receive_intr_fp;
+logic valid_xip_data, valid_xip_data_fp;
+logic tx_clear;
+logic rx_clear;
 
 // state regs
 main_state_t  m_cstate, m_nstate;
@@ -63,6 +67,9 @@ logic        go_busy;
 logic        enable_xip_cmd;
 logic        read_dummy;
 logic        dummy_cs_high;
+logic        read_reg_cmd;
+logic        read_clear;
+logic        write_clear;
 logic [31:0] max_count;
 logic [31:0] incr_val;
 logic [31:0] clk_count;
@@ -88,10 +95,16 @@ logic        t_lsb;
 logic        t_load_latch;
 logic        load;
 
-// reciever control signals
-logic [31:0] r_data;
-logic        r_clear;
-logic        r_enb;
+
+// receiver control signals
+
+logic r_enb;
+logic r_enb_reg1;
+logic r_enb_reg2;
+logic r_enb_latch;
+logic r_enb_t;
+logic r_lsb;
+
 
 // qspi clock control signals
 logic qclk_enb, qclk_reg;
@@ -106,41 +119,69 @@ logic qcbs_out_reg;
 
 // output enable signal;
 logic [3:0] qspi_oe;
+logic [3:0] oeb_latch;
+logic [3:0] oeb_reg;
+
 
 // clock control logic 
+/*
 always_comb begin
 if(!clk_i) begin
     clk_latch = qclk_reg;
     qclk_latch_intrnal = qclk_enb;
     t_load_latch = t_load;
+    r_enb_latch = r_enb;
 end
-/*if(clk_i) begin
-    qclk_latch_intrnal = qclk_enb;
-end*/
-load    = t_load_latch  && clk_i;
-qsclk_o = clk_latch && clk_i;
-qclk_internal = qclk_latch_intrnal && clk_i;
+*/
+
+always @(negedge clk_i) begin
+clk_latch <= qclk_reg;
+qclk_latch_intrnal <= qclk_enb;
+t_load_latch <= t_load;
+r_enb_latch <= r_enb;
 end
+
+assign load    = t_load_latch  && clk_i;
+assign qsclk_o = clk_latch && clk_i;
+assign qclk_internal = qclk_latch_intrnal && clk_i; // not in use
+assign r_enb_t = r_enb_latch;// && clk_i;
 
 // slave select latching logic
 
+always @(negedge clk_i) begin
+if(!rst_ni) begin
+qcsb_latch <= '0;
+oeb_latch <= '0;
+end
+else begin
+qcsb_latch <= qcsb_enb;
+oeb_latch  <= qspi_oe;
+end
+end
+
+/*
 always_comb begin
 if(!clk_i) begin
   qcsb_latch = qcsb_enb;
+  oeb_latch  = qspi_oe;
 end
 end
+*/
 ///*
 always_ff @(negedge clk_i or negedge rst_ni) begin
 	if(!rst_ni) begin
 		qcsb_o      <= 1'b1;
         qcsb_reg    <= 1'b1;
         qcbs_out_reg <= 1'b1;
-        qspi_oeb     <= 4'b1111;
+        qspi_oeb     <= 4'b0000;
+        oeb_reg      <= 4'b0000;
 	end else begin
         qcsb_reg <= qcsb_latch && qcsb_enb;
 		qcbs_out_reg   <= qcsb_reg;
 		qcsb_o   <= qcbs_out_reg;
-		qspi_oeb <= qspi_oe;
+		oeb_reg  <= oeb_latch;
+		qspi_oeb <= oeb_reg;
+		
 	end
 end
 //*/
@@ -154,8 +195,37 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
         control_reg <= '0;
 	    qclk_reg    <= '0;
 	    qclk_out_reg <= '0;
-	
+	    r_enb_reg1   <= '0;
+	    r_enb_reg2   <= '0;
+	    intr_tx      <= 1'b0;
+	    intr_rx      <= 1'b0;
+	    xip_valid    <= 1'b0;
+	    receive_intr_fp <= 1'b0;
+        transmit_intr_fp <= 1'b0;
+        valid_xip_data_fp <= 1'b0;
     end else begin
+    
+        if(rx_clear) begin
+            receive_intr_fp <= '0;
+            intr_rx         <= '0;
+        end else begin
+            receive_intr_fp <= receive_intr;
+            intr_rx         <= receive_intr_fp;
+        end
+        
+        if(tx_clear) begin
+            transmit_intr_fp <= '0;
+            intr_tx          <= '0;
+        end else begin
+            transmit_intr_fp <= transmit_intr;
+            intr_tx          <= transmit_intr_fp;
+        end
+        
+        valid_xip_data_fp <= valid_xip_data;
+        xip_valid         <= valid_xip_data_fp;
+        
+        r_enb_reg1   <= r_enb;
+        r_enb_reg2   <= r_enb_reg1;
         qclk_out_reg <= qclk_enb;
         qclk_reg     <= qclk_out_reg;
 	
@@ -175,6 +245,9 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
                             control_reg <= '0;
                          end
             endcase
+        end else begin
+            control_reg[10] <= 1'b1;
+            control_reg[11] <= 1'b1;
         end
     end
     
@@ -197,6 +270,13 @@ always_comb begin
     enable_xip_cmd = control_reg[4];
     read_dummy     = control_reg[5];
     dummy_cs_high  = control_reg[6];
+    read_reg_cmd   = control_reg[7];
+    t_lsb          = control_reg[8];
+    r_lsb          = control_reg[9];
+    read_clear     = control_reg[10];
+    write_clear    = control_reg[11];
+    tx_clear       = control_reg[12];
+    rx_clear       = control_reg[13];
 end
 
 always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -214,10 +294,7 @@ always_ff @(posedge clk_i or negedge rst_ni) begin
 end
 
 always_comb begin
-   // count_enb   = '0;
-   // count_clear = '0;
-   // max_count   = '0;
-   // incr_val    = '0;
+  // m_cstate = IDLE;
    r_cstate = RCMD;
    w_cstate = WCMD;
  if(enable_xip_cmd) begin
@@ -225,33 +302,54 @@ always_comb begin
  end else begin
    x_cstate = XADDR;
  end
-   
+t_enb = '0;
+t_load = '0;
+r_enb = '0;
+//m_cstate = IDLE;
     unique case (m_nstate) // main_states
         IDLE: begin
-                if(state_read) begin
+                if(state_read && ~read_clear) begin
                     m_cstate  = READ;
-                    max_count = cmd_cycles - 1;
-                    incr_val  = 32'b1;
-                    qclk_enb  = 1'b1;
-                    qcsb_enb  = 1'b0;
-                    qspi_oe   = 4'b000; 
-                    t_data    = {24'b0, cmd_reg};
-                    t_load    = 1'b0;
-                    t_enb       = 1'b1;
-                    t_lsb     = 1'b1;
-
-                    // read required control signals 
-                end else if(state_write) begin
-                    m_cstate = WRITE;
                     max_count = cmd_cycles;
                     incr_val  = 32'b1;
                     qclk_enb  = 1'b1;
                     qcsb_enb  = 1'b0;
-                    qspi_oe   = 4'b000;
-                    t_data    = {24'b0, cmd_reg};
-                    t_load    = 1'b1;
+                    qspi_oe   = 4'b000; 
+                    transmit_intr = 1'b0;
+                    receive_intr = 1'b0;
+                    valid_xip_data = 1'b0;
+                    count_enb = 1'b0;
+                    count_clear = 1'b0;
+                    if(t_lsb) begin
+                        t_data    = {24'b0, cmd_reg};
+                    end else begin
+                        t_data    = {cmd_reg, 24'b0};
+                    end
+
                     t_enb       = 1'b1;
-                    t_lsb     = 1'b1;
+                    
+
+                    // read required control signals 
+                end else if(state_write && ~write_clear) begin
+                    m_cstate = WRITE;
+                    max_count = cmd_cycles;
+                    incr_val  = 32'b1;
+                    qclk_enb  = 1'b1;
+                    qcsb_enb  = 1'b0; 
+                    qspi_oe   = 4'b000;
+                    transmit_intr = 1'b0;
+                    receive_intr = 1'b0;
+                    valid_xip_data = 1'b0;
+                    count_enb = 1'b0;
+                    count_clear = 1'b0;
+                    
+                    if(t_lsb) begin
+                        t_data    = {24'b0, cmd_reg};
+                    end else begin
+                        t_data    = {cmd_reg, 24'b0};
+                    end
+                    t_enb       = 1'b1;
+                    
                     
                     // write required control signals
                 end else if(state_xip) begin
@@ -262,20 +360,37 @@ always_comb begin
                     qclk_enb  = 1'b1;
                     qcsb_enb  = 1'b0;
                     qspi_oe   = 4'b000;
-                    t_data    = {24'b0, cmd_reg};
-                    t_load    = 1'b1;
+                    transmit_intr = 1'b0;
+                    receive_intr = 1'b0;
+                    valid_xip_data = 1'b0;
+                    count_enb = 1'b0;
+                    count_clear = 1'b0;
+                    if(t_lsb) begin
+                        t_data    = {24'b0, cmd_reg};
+                    end else begin
+                        t_data    = {cmd_reg, 24'b0};
+                    end
+                    t_load    = 1'b0;
                     t_enb       = 1'b1;
-                    t_lsb     = 1'b1;
+                    
                    end else begin
-                    max_count = addr_cycles -1 ;
+                    max_count = addr_cycles ;
                     incr_val  = 32'b1;
                     qclk_enb  = 1'b1;
                     qcsb_enb  = 1'b0;
                     qspi_oe   = 4'b000;
-                    t_data    = {8'b0, addr_i[23:0]};
-                    t_load    = 1'b1;
+                    transmit_intr = 1'b0;
+                    receive_intr = 1'b0;
+                    valid_xip_data = 1'b0;
+                    count_enb = 1'b0;
+                    count_clear = 1'b0;
+                    if(t_lsb) begin
+                        t_data    = {8'b0, addr_i[23:0]};
+                    end else begin
+                        t_data    = {addr_i[23:0], 8'b0};
+                    end
                     t_enb     = 1'b1;
-                    t_lsb     = 1'b1;
+                    
                    end
 
 
@@ -290,58 +405,113 @@ always_comb begin
                     qcsb_enb    = 1'b1;
                     t_load      = 1'b0;
                     t_enb       = 1'b0;
-                    t_lsb       = 1'b0;
-                    qspi_oe     = 4'b1111;
+                    r_enb       = 1'b0;
+                    receive_intr = 1'b0;
+                    transmit_intr = 1'b0;
+                    valid_xip_data = 1'b0;
+                    qspi_oe     = 4'b0000;
+                    count_enb = 1'b0;
+                    count_clear = 1'b0;
                 end
               end
         READ: begin
                 unique case (r_nstate) // read_states
                     RCMD: begin
                             if(clk_count != (cmd_cycles-1)) begin
+                                m_cstate = READ;
                                 r_cstate = RCMD;
                                 count_enb   = 1'b1;
                                 count_clear = 1'b0;
+                                max_count = cmd_cycles;
+                                incr_val = 32'b1;
+		                  		      qclk_enb = 1'b1;
+				                        qcsb_enb = 1'b0;
+				                        qspi_oe = 4'b0000;
+				                        transmit_intr = 1'b0;
+				                        receive_intr = 1'b0;
+				                        valid_xip_data = 1'b0;
+				                        count_clear = 1'b0;
                                 if(clk_count >= 1) begin
                                     t_load    = 1'b0;
                                 end else begin
                                     t_load    = 1'b1;
                                 end
-                                
                                 // some control logic
                             end else begin 
-                                r_cstate = RADDR;
-                                count_clear = 1'b1;
-                                count_enb   = 1'b0;
-                                max_count   = addr_cycles -1;
-                                incr_val    = 32'b1;
-                                t_data    = {8'b0,addr_reg};
-                                t_load    = 1'b0;
+                                if(read_reg_cmd) begin 
+                                    m_cstate = READ;
+                                    r_cstate = RDATA;
+				                            qclk_enb = 1'b1;
+				                            qcsb_enb = 1'b0;
+				                            qspi_oe = 4'b0000;
+                                    count_clear = 1'b1;
+                                    count_enb   = 1'b0;
+                                    max_count   = rdata_cycles;
+                                    incr_val    = 32'b1;
+                                    t_load    = 1'b0;
+                                    qspi_oe   = 4'b1111;
+                                    transmit_intr = 1'b0;
+                                    receive_intr = 1'b0;
+                                    valid_xip_data = 1'b0;
+                                end else begin
+                                    m_cstate = READ;
+                                    r_cstate = RADDR;
+                                    count_clear = 1'b1;
+                                    count_enb   = 1'b0;
+		                  		          qclk_enb = 1'b1;
+			                 	            qcsb_enb = 1'b0;
+                				            qspi_oe = 4'b0000;
+                                    max_count   = addr_cycles -1;
+                                    incr_val    = 32'b1;
+                                    transmit_intr = 1'b0;
+                                    receive_intr = 1'b0;
+                                    valid_xip_data = 1'b0;
+                                    if(t_lsb) begin
+                                        t_data    = {8'b0,addr_reg};
+                                    end else begin
+                                        t_data    = {addr_reg, 8'b0};
+                                    end
+                                    
+                                    t_load    = 1'b0;
+                                end
+                                
                                 
                                 // some control logic
                             end
                           end
                     RADDR: begin
                             if(clk_count != (addr_cycles-2)) begin
+                                m_cstate = READ;
                                 r_cstate = RADDR;
                                 count_clear = 1'b0;
+			                 	        qclk_enb = 1'b1;
+                				        qcsb_enb = 1'b0;
+                				        qspi_oe = 4'b0000;
                                 count_enb   = 1'b1;
-                                t_load      = 1'b0;
+                                transmit_intr = 1'b0;
+                                receive_intr = 1'b0;
+                                valid_xip_data = 1'b0;
+                                max_count = addr_cycles;
+                                incr_val = 32'b1;
                                 if(clk_count >= 1) begin
                                     t_load    = 1'b0;
                                 end else begin
                                     t_load    = 1'b1;
                                 end
-                                
                                 //some control logic 
                             end else if(read_dummy) begin
+                                m_cstate = READ;
                                 r_cstate = DUMMY;
                                 count_clear = 1'b1;
                                 count_enb   = 1'b0;
+                			        	qclk_enb = 1'b1;
+                			        	qcsb_enb = 1'b0;
+                			        	qspi_oe = 4'b0000;
                                 max_count   = dummy_cycles;
                                 incr_val    = 32'b1;
-                                //t_data    = '0;
-                                //t_load    = 1'b1;
-                                //t_enb       = 1'b0;
+                                transmit_intr = 1'b0;
+                                receive_intr = 1'b0;
+                                valid_xip_data = 1'b0;
                                 if(dummy_cs_high) begin
                                   qcsb_enb  = 1'b1;
                                 end else begin
@@ -349,104 +519,195 @@ always_comb begin
                                 end
                                 // some control logic
                             end else begin
+                                m_cstate = READ;
                                 r_cstate = RDATA;
                                 count_clear = 1'b1;
                                 count_enb   = 1'b0;
+				                        qclk_enb = 1'b1;
+				                        qcsb_enb = 1'b0;
+				                        qspi_oe = 4'b0000;
                                 max_count   = rdata_cycles;
                                 incr_val    = 32'b1;
-                                //t_enb       = 1'b0;
+                                transmit_intr = 1'b0;
+                                receive_intr = 1'b0;
+                                valid_xip_data = 1'b0;
                             end
                            end
                     DUMMY: begin
                             if(clk_count != (dummy_cycles-1)) begin
+                                m_cstate = READ;
                                 r_cstate = DUMMY;
                                 count_clear = 1'b0;
                                 count_enb   = 1'b1;
-				                //qcsb_enb  = 1'b1;
-				                qspi_oe   = 4'b1111;
-
+			                        	qspi_oe   = 4'b1111;
+			                        	qclk_enb = 1'b0;
+			                        	qcsb_enb = 1'b0;  
+                                transmit_intr = 1'b0;
+                                receive_intr = 1'b0;
+                                valid_xip_data = 1'b0;
+                                max_count = dummy_cycles;
+                                incr_val = 32'b1;
                                 // some control logic
                             end else begin
+                                m_cstate = READ;
                                 r_cstate = RDATA;
                                 count_clear = 1'b1;
+			                        	qclk_enb = 1'b1;
+			                        	qcsb_enb = 1'b0;
                                 count_enb   = 1'b0;
                                 max_count   = rdata_cycles;
                                 incr_val    = 32'b1;
                                 t_enb       = 1'b0;
-
+                                qspi_oe   = 4'b1111;
+                                transmit_intr = 1'b0;
+                                receive_intr = 1'b0;
+                                valid_xip_data = 1'b0;
                                 // some control logic
                             end
                            end
                     RDATA: begin
                             if(clk_count != (rdata_cycles)) begin
+                                m_cstate = READ;
                                 r_cstate = RDATA;
                                 count_clear = 1'b0;
+			                        	qclk_enb = 1'b1;
+			                        	qspi_oe = 4'b0000;
                                 count_enb   = 1'b1;
-                                qcsb_enb  = 1'b0;
-
-
+                                qcsb_enb    = 1'b0;
+                                qspi_oe   = 4'b1111;
+                                r_enb     = 1'b1;
+                                transmit_intr = 1'b0;
+                                receive_intr = 1'b0;
+                                valid_xip_data = 1'b0;
+                                max_count = rdata_cycles;
+                                incr_val = 32'b1;
                                 // some control logic
                             end else begin
                                 r_cstate = RCMD;
                                 m_cstate = IDLE;
                                 count_clear = 1'b1;
                                 count_enb   = 1'b0;
+			                        	qclk_enb = 1'b0;
+			                        	valid_xip_data = 1'b0;
                                 max_count   = 32'b0;
                                 incr_val    = 32'b0;
                                 qclk_enb    = 1'b0;
                                 qcsb_enb  = 1'b1;
+                                qspi_oe   = 4'b0000;
+                                r_enb     = 1'b0;
+                                receive_intr = 1'b1;
+                                transmit_intr = 1'b0;
+                                receive_intr = 1'b0;
                                 // some control logic 
                             end
                            end
+                           
+                           
                 endcase
               end
         WRITE: begin
                 unique case (w_nstate) // write_state
                     WCMD: begin
                             if(clk_count != (cmd_cycles -1)) begin
+                                m_cstate = WRITE;
                                 w_cstate = WCMD;
                                 count_enb   = 1'b1;
+			                        	qclk_enb = 1'b1;
+			                        	qcsb_enb = 1'b0;
+			                        	qspi_oe = 4'b0000;
+			                        	receive_intr = 1'b0;
+			                        	valid_xip_data = 1'b0;
+			                        	max_count = cmd_cycles;
+			                        	incr_val = 32'b1;
                                 count_clear = 1'b0;
-                                t_load      = 1'b0;
+                                transmit_intr = 1'b0;
+                                if(clk_count >= 1) begin
+                                    t_load    = 1'b0;
+                                end else begin
+                                    t_load    = 1'b1;
+                                end;
 
                                 // some control logic
                             end else begin
+                                m_cstate = WRITE;
                                 w_cstate = WADDR;
                                 count_clear = 1'b1;
+			                        	qclk_enb = 1'b1;
+			                        	qcsb_enb = 1'b0;
+			                        	qspi_oe = 4'b0000;
+			                        	receive_intr = 1'b0;
+			                        	valid_xip_data = 1'b0;
                                 count_enb   = 1'b0;
                                 max_count   = addr_cycles;
                                 incr_val    = 1'b1;
-                                t_data      = addr_reg;
-                                t_load      = 1'b1;
+                                transmit_intr = 1'b0;
+                                if(t_lsb) begin
+                                    t_data      = {8'b0, addr_reg[23:0]};
+                                end else begin
+                                    t_data      = {addr_reg[23:0], 8'b0};
+                                end
+                                t_load      = 1'b0;
                                 // some control logic 
                             end 
                           end
                     WADDR: begin
                             if(clk_count != (addr_cycles -1)) begin
+                                m_cstate = WRITE;
                                 w_cstate = WADDR;
                                 count_enb   = 1'b1;
                                 count_clear = 1'b0;
-                                t_load      = 1'b0;
+			                        	qclk_enb = 1'b1;
+			                        	qcsb_enb = 1'b0;
+			                        	qspi_oe = 4'b0000;
+			                        	transmit_intr = 1'b0;
+			                        	receive_intr = 1'b0;
+			                        	valid_xip_data = 1'b0;
+			                        	max_count = addr_cycles;
+			                        	incr_val = 32'b1;
+                                if(clk_count >= 1) begin
+                                    t_load    = 1'b0;
+                                end else begin
+                                    t_load    = 1'b1;
+                                end
 
                                 // some control logic
                             end else begin
+                                m_cstate = WRITE;
                                 w_cstate = WDATA;
                                 count_clear = 1'b1;
                                 count_enb   = 1'b0;
+			                        	qclk_enb = 1'b1;
+			                        	qcsb_enb = 1'b0;
+			                        	qspi_oe = 4'b0000;
+			                        	receive_intr = 1'b0;
+			                        	valid_xip_data = 1'b0;
                                 max_count   = wdata_cycles;
                                 incr_val    = 1'b1;
                                 t_data      = wdata_reg;
-                                t_load      = 1'b1;
-
+                                t_load      = 1'b0;
+                                transmit_intr = 1'b0;
                                 // some control logic
                             end
                            end
                     WDATA: begin
                             if(clk_count != (wdata_cycles -1)) begin
+                                m_cstate = WRITE;
                                 w_cstate = WDATA;
                                 count_enb   = 1'b1;
                                 count_clear = 1'b0;
-                                t_load      = 1'b0;
+			                        	qclk_enb = 1'b1;
+			                        	qcsb_enb = 1'b0;
+			                        	qspi_oe = 4'b0000;
+			                        	transmit_intr = 1'b0;
+			                        	receive_intr = 1'b0;
+			                        	valid_xip_data = 1'b0;
+			                        	max_count = wdata_cycles;
+			                        	incr_val = 32'b1;
+                                if(clk_count >= 1) begin
+                                    t_load    = 1'b0;
+                                end else begin
+                                    t_load    = 1'b1;
+                                end
 
                                 // some control logic
                             end else begin
@@ -454,11 +715,16 @@ always_comb begin
                                 m_cstate = IDLE;
                                 count_clear = 1'b1;
                                 count_enb   = 1'b0;
+			                        	qclk_enb = 1'b0;
+			                        	receive_intr = 1'b0;
+			                        	valid_xip_data = 1'b0;
                                 max_count   = 32'b0;
                                 incr_val    = 32'b0;
                                 qclk_enb    = 1'b0;
                                 qcsb_enb  = 1'b1;
-
+                                transmit_intr = 1'b1;
+                                qspi_oe = 4'b0000;
+                
                                 // some control logic
                             end
                            end
@@ -468,32 +734,82 @@ always_comb begin
                 unique case (x_nstate) // xip_state
                     XCMD: begin
                             if(clk_count != (cmd_cycles-1 )) begin
+                                m_cstate = XIP;
                                 x_cstate = XCMD;
                                 count_enb   = 1'b1;
                                 count_clear = 1'b0;
+				                        qclk_enb = 1'b1;
+				                        qcsb_enb = 1'b0;
+				                        qspi_oe = 4'b0000;
+				                        transmit_intr = 1'b0;
+				                        receive_intr = 1'b0;
+				                        valid_xip_data = 1'b0;
+				                        max_count = cmd_cycles;
+				                        incr_val = 32'b1;
+                                if(clk_count >= 1) begin
+                                    t_load    = 1'b0;
+                                end else begin
+                                    t_load    = 1'b1;
+                                end
+                                valid_xip_data = 1'b0;
 
                                 // some control logic
                             end else begin
+                                m_cstate = XIP;
                                 x_cstate = XADDR;
                                 count_clear = 1'b1;
                                 count_enb   = 1'b0;
+			                        	qclk_enb = 1'b1;
+			                        	qcsb_enb = 1'b0;
+			                        	qspi_oe = 4'b0000;
+			                        	transmit_intr = 1'b0;
+			                        	receive_intr = 1'b0;
+			                        	valid_xip_data = 1'b0;
                                 max_count   = addr_cycles -1;
                                 incr_val    = 1'b1;
+                                if(t_lsb) begin
+                                   t_data    = {8'b0, addr_i[23:0]};
+                                end else begin
+                                   t_data    = {addr_i[23:0], 8'b0};
+                                end
+                                t_load      = 1'b0;
 
                                 // some control logic 
                             end
                           end
                     XADDR: begin
                             if(clk_count != (addr_cycles-2)) begin
+                                m_cstate = XIP;
                                 x_cstate = XADDR;
                                 count_enb   = 1'b1;
+			                        	qclk_enb = 1'b1;
+			                        	qcsb_enb = 1'b0;
+			                        	qspi_oe = 4'b0000;
+			                        	transmit_intr = 1'b0;
+			                        	receive_intr = 1'b0;
+			                        	valid_xip_data = 1'b0;
+			                        	max_count = addr_cycles;
+			                        	incr_val = 32'b1;
                                 count_clear = 1'b0;
+                                if(clk_count >= 1) begin
+                                    t_load    = 1'b0;
+                                end else begin
+                                    t_load    = 1'b1;
+                                end
+                                valid_xip_data = 1'b0;
 
                                 // some control logic
                             end else begin
+                                m_cstate = XIP;
                                 x_cstate = XDUMMY;
                                 count_clear = 1'b1;
                                 count_enb   = 1'b0;
+			                        	qclk_enb = 1'b1;
+			                        	qcsb_enb = 1'b0;
+			                        	qspi_oe = 4'b0000;
+			                        	transmit_intr = 1'b0;
+			                        	receive_intr = 1'b0;
+			                        	valid_xip_data = 1'b0;
                                 max_count   = dummy_cycles;
                                 incr_val    = 1'b1;
                                 if(dummy_cs_high) begin
@@ -501,56 +817,107 @@ always_comb begin
                                 end else begin
                                   qcsb_enb  = 1'b0;
                                 end
-
+                                t_load    = 1'b0;
+                                
                                 // come control logic 
                             end
                           end
                     XDUMMY: begin
                              if(clk_count != (dummy_cycles -1 )) begin
+                                m_cstate = XIP;
                                 x_cstate = XDUMMY;
                                 count_enb   = 1'b1;
                                 count_clear = 1'b0;
-				
+			                        	qclk_enb = 1'b1;
+			                        	qcsb_enb = 1'b0;
+			                        	qspi_oe = 4'b0000;
+			                        	transmit_intr = 1'b0;
+			                        	receive_intr = 1'b0;
+			                        	valid_xip_data = 1'b0;
+			                        	max_count = dummy_cycles;
+			                        	incr_val = 32'b1;
+				                        qspi_oe     = 4'b1111;
 
                                 // some control logic
                              end else begin
+                                m_cstate = XIP;
                                 x_cstate = XDATA;
                                 count_clear = 1'b1;
                                 count_enb   = 1'b0;
+			                        	qclk_enb = 1'b0;
+			                        	qcsb_enb = 1'b0;
+			                        	qspi_oe = 4'b0000;
+			                        	transmit_intr = 1'b0;
+			                        	receive_intr = 1'b0;
+			                        	valid_xip_data = 1'b0;
                                 max_count   = rdata_cycles;
                                 incr_val    = 1'b1;
-                               // qcsb_enb  = 1'b0;
-
+                                t_enb     = 1'b0;
+                                
                                 // some control logic
                              end
                             end
                     XDATA: begin
                             if(clk_count != (rdata_cycles)) begin
+                                m_cstate = XIP;
                                 x_cstate = XDATA;
                                 count_enb   = 1'b1;
                                 count_clear = 1'b0;
+			                        	qclk_enb = 1'b0;
+			                        	transmit_intr = 1'b0;
+			                        	receive_intr = 1'b0;
+			                        	valid_xip_data = 1'b0;
+			                        	max_count = rdata_cycles;
+			                        	incr_val = 32'b1;
                                 qcsb_enb  = 1'b0;
+                                r_enb      = 1'b1;
+			                        	qspi_oe = 4'b0000;
 
                                 // some control logic
-                            end else if(!state_xip) begin
+                            end else begin
+                             if(!state_xip) begin
                                 x_cstate = XCMD;
                                 m_cstate = IDLE;
                                 count_clear = 1'b1;
                                 count_enb   = 1'b0;
+			                        	qclk_enb = 1'b0;
+			                        	receive_intr = 1'b0;
+			                        	valid_xip_data = 1'b0;
                                 max_count   = 32'b0;
                                 incr_val    = 32'b0;
                                 qclk_enb    = 1'b0;
-                                qcsb_enb  = 1'b1;
+                                qcsb_enb    = 1'b1;
+                                r_enb       = 1'b0;
+                                valid_xip_data = 1'b1;
+                                transmit_intr = 1'b1;
+			                        	qspi_oe = 4'b0000;
 
                                 // some control logic 
-                            end else begin
+                             end else begin
+                                m_cstate = XIP;
                                 x_cstate = XADDR;
                                 count_clear = 1'b1;
                                 count_enb   = 1'b0;
-                                max_count   = addr_cycles;
+			                        	qclk_enb = 1'b0;
+			                        	qcsb_enb = 1'b0;
+			                        	receive_intr = 1'b0;
+                                max_count   = addr_cycles -1;
                                 incr_val    = 1'b1;
-
+				                        qspi_oe = 4'b0000;
+				                        transmit_intr = 1'b0;
+				                        valid_xip_data = 1'b0;
+                                if(t_lsb) begin
+                                   t_data    = {8'b0, addr_i[23:0]};
+                                end else begin
+                                   t_data    = {addr_i[23:0], 8'b0};
+                                end
+                                t_load      = 1'b0;
+                                t_enb       = 1'b1;
+                                qspi_oe     = 4'b0000;
+                                r_enb      = 1'b0;
+                                valid_xip_data = 1'b1;
                                 // some control logic
+                             end
                             end
                            end
                 endcase
@@ -578,11 +945,19 @@ qspi_transmitter u_transmitter(
     .clk_i      (clk_i),
     .rst_ni     (rst_ni),
     .p_data_i   (t_data),
-    .t_enb_i    (t_enb),
+    .t_enb_i    ((state_read || state_xip) ? t_enb : (t_enb || ~qcsb_o)),
     .t_load_i   (t_load),
     .lsb_i      (t_lsb),
-    .s_out_o    (),
-    .s_oeb_o    ()
+    .s_out_o    (qspi_o)
 );
 
+qspi_receiver u_receiver(
+    .clk_i  (clk_i),
+    .rst_ni (rst_ni),
+    .s_in_i (qspi_i),
+    .enb_i  (r_enb_reg2),
+    .lsb_i  (r_lsb),
+    .p_out_o(rdata_o)
+);
 endmodule
+
